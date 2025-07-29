@@ -9,7 +9,7 @@ import json
 
 # --- Configuration ---
 KERNEL_SIZE = 16
-BYTES_PER_KERNEL = 2
+BYTES_PER_KERNEL = 4
 USE_MANCHESTER = True
 BRIGHTNESS = 15
 STEGANO_COEFFS = [[0, 2], [0, 1], [1, 0], [1, 1], [2, 1], [2, 0], [1, 2], [3, 0], [2, 2], [0, 3], [3, 1], [4, 0], [1, 3], [4, 1], [3, 2], [0, 4], [5, 0], [1, 4], [3, 3], [5, 1], [4, 2], [2, 4], [0, 5], [6, 0], [0, 6], [3, 4], [5, 2], [4, 3], [2, 5], [1, 5], [1, 6], [6, 1]]
@@ -112,14 +112,12 @@ def bytes_to_dct(w, h, data, dct_basis0, dct_basis1):
         for i in range(w):
             block_img = Image.new('L', (KERNEL_SIZE, KERNEL_SIZE))
             
-            byte1 = data[bid]
-            byte2 = data[bid+1]
+            bytes_to_process = data[bid : bid + BYTES_PER_KERNEL]
             
             bits = []
-            for bit_idx in range(8):
-                bits.append((byte1 >> (7-bit_idx)) & 1)
-            for bit_idx in range(8):
-                bits.append((byte2 >> (7-bit_idx)) & 1)
+            for byte_val in bytes_to_process:
+                for bit_idx in range(8):
+                    bits.append((byte_val >> (7-bit_idx)) & 1)
 
             for k, bit_val in enumerate(bits):
                 st = STEGANO_COEFFS[k]
@@ -132,7 +130,7 @@ def bytes_to_dct(w, h, data, dct_basis0, dct_basis1):
                 block_img = ImageChops.add(block_img, tile)
             
             stegano_image.paste(block_img, (i * KERNEL_SIZE, j * KERNEL_SIZE))
-            bid += 2
+            bid += BYTES_PER_KERNEL
     return stegano_image
 
 def encode(input_image_path, output_image_path, data, start_x, start_y):
@@ -140,11 +138,10 @@ def encode(input_image_path, output_image_path, data, start_x, start_y):
     dct_basis0 = Image.open("dct0.png")
     dct_basis1 = Image.open("dct1.png")
     
-    w = -(-len(data) // BYTES_PER_KERNEL) # Ceiling division
-    h = 1
-    
     # Hamming encode
     encoded_data = hamming48_encode(data, USE_MANCHESTER)
+    w = -(-len(encoded_data) // BYTES_PER_KERNEL) # Ceiling division
+    h = 1
     padded_data = stegano_fill_random(encoded_data, w * h * 2)
     
     stegano_block = bytes_to_dct(w, h, padded_data, dct_basis0, dct_basis1)
@@ -159,7 +156,22 @@ def encode(input_image_path, output_image_path, data, start_x, start_y):
     
     mean_luma_img = Image.new('L', y.size, int(np.mean(np.array(y))))
     
-    alpha = 0.3
+    # Calculate variance of the luma channel for adaptive blending
+    y_array = np.array(y)
+    luma_variance = np.var(y_array)
+
+    # Define min/max alpha values and a scaling factor for variance
+    min_alpha = 0.1
+    max_alpha = 0.5
+    # A rough estimate for max variance, can be tuned based on image characteristics
+    # Max possible variance for 8-bit image is (255-0)^2 / 4 = 16256.25
+    # Using a more practical upper bound for typical image regions
+    max_expected_variance = 5000 
+    
+    # Linear mapping and clamping to ensure alpha stays within bounds
+    alpha = min_alpha + (luma_variance / max_expected_variance) * (max_alpha - min_alpha)
+    alpha = np.clip(alpha, min_alpha, max_alpha) 
+
     blended_luma = Image.blend(mean_luma_img, stegano_block, alpha)
     
     final_region = Image.merge('YCbCr', (blended_luma, cb, cr)).convert('RGB')
